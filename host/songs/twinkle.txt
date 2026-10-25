@@ -1,0 +1,9 @@
+title: Twinkle Twinkle Little Star
+bpm: 96
+# The tune reaches A4, a sixth key, and the glove has five fingers.
+# This map keeps the real notes and lets the pinky stand in for A4 (it plays G4 there).
+map: C4=1 D4=2 E4=3 F4=4 G4=5 A4=5
+
+C4 C4 G4 G4 | A4 A4 G4:2 | F4 F4 E4 E4 | D4 D4 C4:2
+G4 G4 F4 F4 | E4 E4 D4:2 | G4 G4 F4 F4 | E4 E4 D4:2
+C4 C4 G4 G4 | A4 A4 G4:2 | F4 F4 E4 E4 | D4 D4 C4:2

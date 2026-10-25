@@ -2,3 +2,6 @@
 build/
 *.bin
 *.elf
+.venv/
+__pycache__/
+*.pyc

@@ -2,7 +2,7 @@
 
 #define LED_PIN 2  // built-in LED, on while a servo is moving
 
-const int SERVO_PINS[] = {18, 19, 21, 22, 23};
+const int SERVO_PINS[] = {22};  // add pins back here later, e.g. {18, 19, 21, 22, 23}
 const int NUM_SERVOS = sizeof(SERVO_PINS) / sizeof(SERVO_PINS[0]);
 
 const int MIN_PULSE_US = 500;   // pulse width for 0 degrees (SG90/MG90S)
@@ -11,7 +11,7 @@ const int MAX_PULSE_US = 2400;  // pulse width for 180 degrees
 const int ANGLE_REST = 0;
 const int ANGLE_ACTIVE = 180;
 
-const unsigned long HOLD_MS = 2000;  // how long each servo holds at 180
+const unsigned long HOLD_MS = 2000;  // how long the servo holds at 180
 const unsigned long GAP_MS = 500;    // pause after returning to 0
 
 Servo servos[NUM_SERVOS];
@@ -34,10 +34,10 @@ void setup() {
     servos[i].write(ANGLE_REST);
     Serial.print("Attached servo on GPIO ");
     Serial.println(SERVO_PINS[i]);
-    delay(200);  // stagger startup so all 5 don't jerk at once
+    delay(200);
   }
 
-  Serial.println("ESP32 Servo Test Started: sweeping servos one at a time...");
+  Serial.println("ESP32 Servo Test Started: sweeping GPIO 18 only...");
 }
 
 void loop() {
