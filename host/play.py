@@ -46,11 +46,20 @@ class Glove:
             sys.exit("pyserial is not installed. Run: pip install pyserial")
         self.verbose = verbose
         try:
-            self.ser = serial.Serial(port, BAUD, timeout=0.1)
+            # A plain open() asserts DTR and RTS, and the DevKit's auto-reset
+            # circuit then holds the ESP32 in a reset loop (it streams 00 80 00
+            # with no newline, so reads never return). Open with both released,
+            # then give the board one clean reset pulse so it boots fresh:
+            # disarmed, nothing queued, banner ending in "# ready".
+            self.ser = serial.Serial(baudrate=BAUD, timeout=0.1)
+            self.ser.port = port
+            self.ser.dtr = False
+            self.ser.rts = False
+            self.ser.open()
         except serial.SerialException as e:
             sys.exit(f"Can't open {port}: {e}\nIs the Arduino Serial Monitor still open? Close it and retry.")
+        self.reset_board()
         print(f"Opened {port}, waiting for the glove to boot...")
-        # Opening the port resets the ESP32. Its banner ends with "# ready".
         if not self.wait_for("# ready", 6.0):
             self.ser.reset_input_buffer()
             try:
@@ -58,8 +67,17 @@ class Glove:
             except GloveError:
                 sys.exit("Nothing answered. Is the glove firmware uploaded and this the right port? (--list-ports)")
 
+    def reset_board(self):
+        try:
+            self.ser.rts = True        # EN low
+            time.sleep(0.1)
+            self.ser.rts = False
+            self.ser.reset_input_buffer()
+        except OSError:
+            pass                       # a virtual port (pty) has no modem lines; nothing to pulse
+
     def readline(self):
-        raw = self.ser.readline()
+        raw = self.ser.read_until(b"\n", 512)   # size cap: a newline-less stream can't hang us
         if not raw:
             return None
         return raw.decode("utf-8", "replace").strip()
@@ -68,7 +86,7 @@ class Glove:
         if line.startswith("!"):
             print(colour(f"  {line}", "1;31"))
         elif line.startswith("#"):
-            if self.verbose or not line.startswith("# ems"):
+            if self.verbose or not line.startswith(("# ems on", "# ems off")):
                 print(colour(f"  {line}", "2"))
         elif self.verbose and line:
             print(colour(f"  {line}", "2"))
