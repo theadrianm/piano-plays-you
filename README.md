@@ -73,13 +73,11 @@ Do this once, in order, **with the TENS unplugged from the relays**.
 
 1. **Upload, open the Serial Monitor.** You should see the status banner ending in `# ready`. Send `?`.
 2. **Servos.** Send `D`. Each finger's servo should move in turn: thumb, index, middle, ring, pinky, and back. If the order is wrong, swap plugs, don't edit code.
-3. **Calibrate the locks.** For each finger, find the angle where the badge reel is blocked and the angle where it runs free:
+3. **Calibrate the locks.** Every servo horn went on at a slightly different angle, so each finger gets its own lock and release angle. In a terminal window:
    ```
-   S 1 0        # thumb servo to 0, try to curl the thumb
-   S 1 90       # try again
-   C 1 0 90     # lock angle 0, release angle 90, saved
+   cd host && .venv/bin/python calibrate.py
    ```
-   Repeat for 2..5. `C` prints the table. Then `X` and check every finger is blocked, `R *` and check every finger is free.
+   Pick a finger with `1`–`5`, nudge the live servo with `a`/`d` (±1) or `A`/`D` (±10) until the badge reel is blocked, press `space` and nudge until it runs free, `s` saves that finger to the glove's flash, `t` saves and plays it once. `g` parks every finger at its lock angle so you can compare them side by side. The same thing by hand over serial: `S 1 40` moves the thumb to 40°, `C 1 40 130` saves lock 40 / release 130, `C` prints the table.
 4. **Relays, TENS still unplugged.** `A 1`, then `K 1 1000`: relay 1 clicks and its LED lights for one second. `K 2 1000` for relay 2. (`python host/relay_test.py --yes` does this sequence for you.) With a multimeter in continuity mode on the two screw terminals you wired: **no beep when the LED is off, beep when it is on.** If it beeps when off, the wire is on NC instead of NO. Fix that before going further. No click and no LED at all means the relay board has no 5 V: its VCC comes off the servo rail, so the battery has to be on.
 5. **Pick the mask.** Both relays close for a note by default (`M 3`). If only one is in the TENS path, `M 1` or `M 2`.
 6. **TENS, low.** Plug the TENS in, intensity near zero, pads on the forearm, `A 1`, `E 300`. Raise the dial until the fingers twitch. Then `P 2 300` with the glove on: only the index finger should press.

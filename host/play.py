@@ -109,7 +109,8 @@ class Glove:
                 return
             self.show(line)
 
-    def cmd(self, line, timeout=1.5):
+    def cmd(self, line, timeout=1.5, capture=None):
+        """Send one line, return its ok reply. Info lines go to show() and, if given, the capture list."""
         self.ser.write((line.strip() + "\n").encode())
         deadline = time.monotonic() + timeout
         while time.monotonic() < deadline:
@@ -120,6 +121,8 @@ class Glove:
                 return reply
             if reply.startswith("err"):
                 raise GloveError(f"{line!r} -> {reply}")
+            if capture is not None:
+                capture.append(reply)
             self.show(reply)
         raise GloveError(f"no reply to {line!r}")
 
