@@ -1,5 +1,5 @@
-# Finger numbers instead of notes: 1 = thumb ... 5 = pinky. Good first test.
-title: Five-finger scale
+# Finger numbers: 2 = index ... 5 = pinky (the thumb is out). Good first test.
+title: Four-finger scale
 bpm: 80
 
-1 2 3 4 5 | 4 3 2 1:2 | r:2 | [13]:2 [24]:2 | 135:4
+2 3 4 5 | 4 3 2:2 | r:2 | [24]:2 [35]:2 | 2345:4
