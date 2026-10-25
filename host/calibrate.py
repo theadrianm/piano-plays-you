@@ -24,6 +24,10 @@ One-shot forms, fine from any prompt:
 LOCK is the angle where the badge reel is blocked (the finger can't curl),
 RELEASE the angle where it runs free. The values live in the glove's flash and
 survive reboots; play.py never changes them.
+
+Angles run from -15 to 195, a little past the usual 0..180, for a horn that sits
+one spline tooth off. A servo that buzzes has hit its end stop: back off 2-3
+degrees, or move the horn.
 """
 from __future__ import annotations
 
@@ -37,7 +41,8 @@ import tty
 from play import Glove, GloveError, colour, find_port
 
 NAMES = ["thumb", "index", "middle", "ring", "pinky"]
-ANGLE_RE = re.compile(r"(thumb|index|middle|ring|pinky) (\d+)/(\d+)")
+MIN_ANGLE, MAX_ANGLE = -15, 195          # the firmware's limits: a little past both ends
+ANGLE_RE = re.compile(r"(thumb|index|middle|ring|pinky) (-?\d+)/(-?\d+)")
 NUDGE = {"a": -1, "d": 1, "A": -10, "D": 10, "left": -1, "right": 1, "down": -10, "up": 10}
 HELP = (" 1-5 finger | space lock/release | a/d ±1  A/D ±10 (arrows too) | s save | t save+play"
         " | u undo | g all lock | R all release | q quit")
@@ -126,7 +131,7 @@ def interactive(glove):
                     hold(finger, edit[finger][which])
                     status = ""
                 elif key in NUDGE:
-                    edit[finger][which] = max(0, min(180, edit[finger][which] + NUDGE[key]))
+                    edit[finger][which] = max(MIN_ANGLE, min(MAX_ANGLE, edit[finger][which] + NUDGE[key]))
                     hold(finger, edit[finger][which])
                     status = ""
                 elif key == "s":
@@ -180,8 +185,8 @@ def angle_arg(s):
         v = int(s)
     except ValueError:
         v = -1
-    if not 0 <= v <= 180:
-        sys.exit(f"angle must be 0-180, not {s!r}")
+    if not MIN_ANGLE <= v <= MAX_ANGLE:
+        sys.exit(f"angle must be {MIN_ANGLE}..{MAX_ANGLE}, not {s!r}")
     return v
 
 

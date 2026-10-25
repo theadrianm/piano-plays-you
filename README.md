@@ -23,7 +23,7 @@ The potentiometers are not used. The firmware only needs to know whether a key s
 
 ## Firmware (`firmware/glove`)
 
-Open `firmware/glove/glove.ino` in the Arduino IDE, board **ESP32 Dev Module**, library **ESP32Servo**, upload, Serial Monitor at **115200** with line ending **Newline**. (`firmware/servo_test` and `firmware/pot_test` are the earlier bring-up sketches.)
+Open `firmware/glove/glove.ino` in the Arduino IDE, board **ESP32 Dev Module**, no extra libraries, upload, Serial Monitor at **115200** with line ending **Newline**. (`firmware/servo_test` and `firmware/pot_test` are the earlier bring-up sketches; those two do need the ESP32Servo library.)
 
 ### What a note is
 
@@ -78,6 +78,8 @@ Do this once, in order, **with the TENS unplugged from the relays**.
    cd host && .venv/bin/python calibrate.py
    ```
    Pick a finger with `1`–`5`, nudge the live servo with `a`/`d` (±1) or `A`/`D` (±10) until the badge reel is blocked, press `space` and nudge until it runs free, `s` saves that finger to the glove's flash, `t` saves and plays it once. `g` parks every finger at its lock angle so you can compare them side by side. The same thing by hand over serial: `S 1 40` moves the thumb to 40°, `C 1 40 130` saves lock 40 / release 130, `C` prints the table.
+
+   Angles run from **−15 to 195**, a little past the usual 0–180, which covers a horn that went on one spline tooth off. A servo that buzzes has hit its mechanical end stop: back off a few degrees, or re-seat the horn (hold the servo at 30 with `calibrate.py move all 30`, pull the horn, press it back on in the blocked position).
 4. **Relays, TENS still unplugged.** `A 1`, then `K 1 1000`: relay 1 clicks and its LED lights for one second. `K 2 1000` for relay 2. (`python host/relay_test.py --yes` does this sequence for you.) With a multimeter in continuity mode on the two screw terminals you wired: **no beep when the LED is off, beep when it is on.** If it beeps when off, the wire is on NC instead of NO. Fix that before going further. No click and no LED at all means the relay board has no 5 V: its VCC comes off the servo rail, so the battery has to be on.
 5. **Pick the mask.** Both relays close for a note by default (`M 3`). If only one is in the TENS path, `M 1` or `M 2`.
 6. **TENS, low.** Plug the TENS in, intensity near zero, pads on the forearm, `A 1`, `E 300`. Raise the dial until the fingers twitch. Then `P 2 300` with the glove on: only the index finger should press.
@@ -130,5 +132,4 @@ python play.py songs/happy-birthday.txt --arm
 - **Commands do nothing in the Serial Monitor.** Line ending must be Newline (the firmware also accepts a 200 ms pause as end of line).
 - **`P` moves the servo but nothing happens on the arm.** `?` says DISARMED: send `A 1`. Or `M` points at the wrong relay.
 - **`! cutoff` on serial.** Something kept a relay closed for 2 s. Everything stopped; send `?`, then carry on.
-- **`Pin already attached to LEDC` at boot.** Only shows if the IDE's Core Debug Level is set. ESP32Servo 3.2.1 attaches each pin twice; harmless.
 - **play.py: can't open port.** The Serial Monitor is still open, or two ports are listed (pass `--port`).

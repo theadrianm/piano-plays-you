@@ -21,11 +21,15 @@
 extern unsigned long g_now;          // simulated millis()
 extern int g_pins[64];               // last digitalWrite per pin, -1 = never written
 extern int g_pinMode[64];
+extern uint32_t g_ledcDuty[64];      // last ledcWrite per pin, 0 = never written
 
 inline unsigned long millis() { return g_now; }
 inline void delay(unsigned long ms) { g_now += ms; }
 inline void pinMode(int pin, int mode) { g_pinMode[pin] = mode; }
 inline void digitalWrite(int pin, int val) { g_pins[pin] = val; }
+inline bool ledcAttach(uint8_t pin, uint32_t, uint8_t) { g_pinMode[pin] = 100; return true; }
+inline bool ledcWrite(uint8_t pin, uint32_t duty) { g_ledcDuty[pin] = duty; return true; }
+inline bool ledcDetach(uint8_t pin) { g_ledcDuty[pin] = 0; g_pinMode[pin] = -1; return true; }
 
 struct FakeSerial {
   std::string in;    // bytes the sketch has not read yet

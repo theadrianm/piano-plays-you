@@ -1,6 +1,6 @@
 // Piano Plays You - glove firmware
-// Board: ESP32 Dev Module (ESP-WROOM-32). Libraries: ESP32Servo (Library Manager),
-// Preferences (ships with the ESP32 core).
+// Board: ESP32 Dev Module (ESP-WROOM-32). No extra libraries: servo PWM is done
+// straight on the LEDC peripheral, settings use Preferences from the core.
 //
 // Five MG90S servos sit on the badge reels and work as finger locks:
 //   LOCKED   = the reel can't pay out, so the finger can't curl and press a key
@@ -25,6 +25,8 @@
 //   R <fingers>                  release servo(s) and leave them released
 //   L <fingers>                  lock servo(s) now (cancels their notes)
 //   S <finger> <angle>           move one servo to an exact angle (calibration)
+//                                angles run -15..195: a little past both ends, for
+//                                a horn that sits one spline tooth off
 //   C                            show lock/release angles
 //   C <finger> <lock> <release>  set them (saved to flash)
 //   T                            show timing
@@ -50,7 +52,6 @@
 //   * The TENS intensity knob is the real ceiling: the glove can only pass
 //     through what a person set on the dial, never more.
 
-#include <ESP32Servo.h>
 #include <Preferences.h>
 
 // ------------------------------------------------------------------ pins ----
@@ -62,8 +63,19 @@ const int   RELAY_PINS[NUM_RELAYS] = {25, 26};                   // IN1, IN2 on 
 const bool  RELAY_ACTIVE_LOW = true;                             // SRD-05VDC opto boards: IN low = closed
 const int   LED_PIN = 2;                                         // built-in LED, on while a relay is closed
 
-const int MIN_PULSE_US = 500;                                    // SG90 / MG90S pulse range
-const int MAX_PULSE_US = 2400;
+// Servo PWM on LEDC: 50 Hz, 16 bits = 0.3 us steps. 0 and 180 degrees are the
+// usual 500 / 2400 us; angles may go a little past both ends (the ESP32Servo
+// library would refuse that), but never past the pulse floor and ceiling,
+// which is about where these servos hit their end stops.
+const int SERVO_PWM_HZ   = 50;
+const int SERVO_PWM_BITS = 16;
+const int MIN_PULSE_US   = 500;    // 0 degrees  (SG90 / MG90S)
+const int MAX_PULSE_US   = 2400;   // 180 degrees
+const int PULSE_FLOOR_US = 350;
+const int PULSE_CEIL_US  = 2600;
+const int MIN_ANGLE = -15;         // what S and C accept
+const int MAX_ANGLE = 195;
+const int NO_ANGLE  = -1000;       // "no manual angle" marker (any real angle is legal, 0 and -1 included)
 
 // ---------------------------------------------------------- hard limits ----
 const unsigned long MIN_PRESS_MS    = 30;
@@ -82,11 +94,13 @@ const unsigned long DEFAULT_RELAX_MS = 50;        // relays open -> servo locked
 const unsigned long DEFAULT_GAP_MS   = 150;       // minimum relays-open time between pulses (finger lift time)
 const unsigned long DEFAULT_PRESS_MS = 300;       // pulse length when P / E give none
 const uint8_t       DEFAULT_EMS_MASK = 0b11;      // relays closed by an EMS pulse (bit0 = relay 1, bit1 = relay 2)
+const uint8_t       DEFAULT_DISABLED = 0b00001;   // fingers left alone entirely (bit0 thumb .. bit4 pinky): thumb off for now
 
 int           lockAngle[NUM_FINGERS];
 int           releaseAngle[NUM_FINGERS];
 unsigned long leadMs, relaxMs, gapMs, pressMs;
 uint8_t       emsMask;
+uint8_t       disabledMask;              // servo never driven, dropped from every command (N)
 
 // ----------------------------------------------------------------- state ----
 struct Note {
@@ -97,11 +111,10 @@ struct Note {
 const int MAX_NOTES = 32;
 Note notes[MAX_NOTES];
 
-Servo       servos[NUM_FINGERS];
 Preferences prefs;
 
 uint8_t       manualReleased = 0;        // R: fingers held released
-int           manualAngle[NUM_FINGERS];  // S: exact angle, -1 = none
+int           manualAngle[NUM_FINGERS];  // S: exact angle, NO_ANGLE = none
 bool          relayPulse[NUM_RELAYS];    // K: relay closed by hand until relayPulseEnd
 unsigned long relayPulseEnd[NUM_RELAYS];
 bool          armed = ARMED_AT_BOOT;
@@ -114,7 +127,10 @@ bool          anyRelayOn = false;
 unsigned long relayOnSince = 0;
 bool          resting = false;           // in the forced rest after a cutoff
 unsigned long restUntil = 0;
-int           servoTarget[NUM_FINGERS];  // last angle written, -1 = none
+int           servoTarget[NUM_FINGERS];  // last angle written, NO_ANGLE = none
+bool          servoAttached[NUM_FINGERS];
+
+void applyDisabled();
 
 char          lineBuf[96];
 size_t        lineLen = 0;
@@ -136,6 +152,22 @@ void err(const char* s) { Serial.print("err "); Serial.println(s); }
 
 void relayWrite(int r, bool on) {
   digitalWrite(RELAY_PINS[r], (on != RELAY_ACTIVE_LOW) ? HIGH : LOW);
+}
+
+int angleToPulseUs(int angle) {
+  long us = MIN_PULSE_US + (long)angle * (MAX_PULSE_US - MIN_PULSE_US) / 180;
+  return clampLong(us, PULSE_FLOOR_US, PULSE_CEIL_US);
+}
+
+bool servoAttach(int i) {
+  return ledcAttach(SERVO_PINS[i], SERVO_PWM_HZ, SERVO_PWM_BITS);
+}
+
+void servoWrite(int i, int angle) {
+  if (!servoAttached[i]) return;         // disabled finger: never driven
+  const uint32_t maxDuty = (1UL << SERVO_PWM_BITS) - 1;
+  const uint32_t periodUs = 1000000UL / SERVO_PWM_HZ;
+  ledcWrite(SERVO_PINS[i], (uint32_t)((uint64_t)angleToPulseUs(angle) * maxDuty / periodUs));
 }
 
 const char* fingerStr(uint8_t mask) {
@@ -201,6 +233,7 @@ void setDefaults() {
   gapMs   = DEFAULT_GAP_MS;
   pressMs = DEFAULT_PRESS_MS;
   emsMask = DEFAULT_EMS_MASK;
+  disabledMask = DEFAULT_DISABLED;
 }
 
 void loadSettings() {
@@ -208,15 +241,16 @@ void loadSettings() {
   char key[8];
   for (int i = 0; i < NUM_FINGERS; i++) {
     snprintf(key, sizeof key, "lock%d", i);
-    lockAngle[i] = clampLong(prefs.getInt(key, lockAngle[i]), 0, 180);
+    lockAngle[i] = clampLong(prefs.getInt(key, lockAngle[i]), MIN_ANGLE, MAX_ANGLE);
     snprintf(key, sizeof key, "rel%d", i);
-    releaseAngle[i] = clampLong(prefs.getInt(key, releaseAngle[i]), 0, 180);
+    releaseAngle[i] = clampLong(prefs.getInt(key, releaseAngle[i]), MIN_ANGLE, MAX_ANGLE);
   }
   leadMs  = clampLong(prefs.getUInt("lead",  leadMs),  0, 1000);
   relaxMs = clampLong(prefs.getUInt("relax", relaxMs), 0, 2000);
   gapMs   = clampLong(prefs.getUInt("gap",   gapMs),   0, 2000);
   pressMs = clampLong(prefs.getUInt("press", pressMs), MIN_PRESS_MS, MAX_PRESS_MS);
   emsMask = clampLong(prefs.getUInt("mask",  emsMask), 1, 3);
+  disabledMask = clampLong(prefs.getUInt("off", disabledMask), 0, (1 << NUM_FINGERS) - 1);
   prefs.end();
 }
 
@@ -234,6 +268,7 @@ void saveSettings() {
   prefs.putUInt("gap",   gapMs);
   prefs.putUInt("press", pressMs);
   prefs.putUInt("mask",  emsMask);
+  prefs.putUInt("off",   disabledMask);
   prefs.end();
 }
 
@@ -243,7 +278,8 @@ void forgetSettings() {
     prefs.end();
   }
   setDefaults();
-  for (int i = 0; i < NUM_FINGERS; i++) servoTarget[i] = -1;   // re-send the angles
+  for (int i = 0; i < NUM_FINGERS; i++) servoTarget[i] = NO_ANGLE;   // re-send the angles
+  applyDisabled();
 }
 
 // ----------------------------------------------------------------- notes ----
@@ -268,7 +304,7 @@ void clearNotes() {
 
 void clearManualAngles(uint8_t mask) {
   for (int i = 0; i < NUM_FINGERS; i++) {
-    if (mask & (1 << i)) manualAngle[i] = -1;
+    if (mask & (1 << i)) manualAngle[i] = NO_ANGLE;
   }
 }
 
@@ -280,6 +316,29 @@ void cancelFingers(uint8_t mask) {
     n.fingers &= ~mask;
     if (n.fingers == 0) n.active = false;
   }
+}
+
+// Make the servos match disabledMask: a disabled finger's pin stops pulsing
+// (the servo goes limp and stays wherever it is) and it drops out of every
+// note; a re-enabled one is attached again and goes to its lock angle.
+void applyDisabled() {
+  for (int i = 0; i < NUM_FINGERS; i++) {
+    const bool off = (disabledMask >> i) & 1;
+    if (off && servoAttached[i]) {
+      ledcDetach(SERVO_PINS[i]);
+      pinMode(SERVO_PINS[i], INPUT);
+      servoAttached[i] = false;
+    } else if (!off && !servoAttached[i]) {
+      servoAttached[i] = servoAttach(i);
+      if (!servoAttached[i]) {
+        Serial.print("! servo pwm failed on GPIO ");
+        Serial.println(SERVO_PINS[i]);
+      }
+    }
+    if (off || !servoAttached[i]) servoTarget[i] = NO_ANGLE;   // tick() re-sends when it comes back
+  }
+  cancelFingers(disabledMask);
+  clearManualAngles(disabledMask);
 }
 
 void openRelays(unsigned long now) {
@@ -299,11 +358,11 @@ void openRelays(unsigned long now) {
 void stopAll() {
   clearNotes();
   manualReleased = 0;
-  for (int i = 0; i < NUM_FINGERS; i++) manualAngle[i] = -1;
+  for (int i = 0; i < NUM_FINGERS; i++) manualAngle[i] = NO_ANGLE;
   openRelays(millis());
   for (int i = 0; i < NUM_FINGERS; i++) {
     servoTarget[i] = lockAngle[i];
-    servos[i].write(lockAngle[i]);
+    servoWrite(i, lockAngle[i]);
   }
 }
 
@@ -396,12 +455,12 @@ void tick() {
   // Servos.
   for (int i = 0; i < NUM_FINGERS; i++) {
     int angle;
-    if (manualAngle[i] >= 0)          angle = manualAngle[i];
+    if (manualAngle[i] != NO_ANGLE)   angle = manualAngle[i];
     else if ((released >> i) & 1)     angle = releaseAngle[i];
     else                              angle = lockAngle[i];
     if (angle != servoTarget[i]) {
       servoTarget[i] = angle;
-      servos[i].write(angle);
+      servoWrite(i, angle);
     }
   }
 }
@@ -469,14 +528,26 @@ void printStatus() {
   for (const Note& n : notes) {
     if (n.active) inFlight++;
   }
-  Serial.print("# held released: ");
+  Serial.print("# disabled: ");
+  if (disabledMask == 0) {
+    Serial.print("none");
+  } else {
+    for (int i = 0; i < NUM_FINGERS; i++) {
+      if ((disabledMask >> i) & 1) {
+        Serial.print(FINGER_NAMES[i]);
+        Serial.print(' ');
+      }
+    }
+    Serial.print("(N 0 brings them back)");
+  }
+  Serial.print(" | held released: ");
   Serial.print(fingerStr(manualReleased));
   Serial.print(" | notes in flight: ");
   Serial.print(inFlight);
   Serial.print(" | log ");
   Serial.println(verbose ? "on" : "off");
-  Serial.println("# P fingers [ms] | E [ms] | R f | L f | S f angle | C [f lock rel] | "
-                 "T [lead relax gap press] | M mask | A 0|1 | K relay [ms] | D | V 0|1 | F | X | ?");
+  Serial.println("# P fingers [ms] | E [ms] | R f | L f | S f angle | C [f lock rel] | T [lead relax gap press] | "
+                 "M mask | N fingers|0 | A 0|1 | K relay [ms] | D | V 0|1 | F | X | ?");
 }
 
 // -------------------------------------------------------------- commands ----
@@ -507,6 +578,8 @@ void handleLine(char* line) {
       if (ntok < 2 || !parseFingers(tok[1], mask)) { err("P <fingers> [pressMs]   e.g. P 3 300 or P 13 400"); return; }
       a = pressMs;
       if (ntok >= 3 && !parseNum(tok[2], a, MIN_PRESS_MS, MAX_PRESS_MS)) { err("press must be 30..1500 ms"); return; }
+      mask &= ~disabledMask;
+      if (mask == 0) { ok("P skipped: finger disabled"); return; }
       if (!scheduleNote(mask, now, a)) { err("too many notes in flight"); return; }
       clearManualAngles(mask);
       Serial.print("ok P ");
@@ -527,6 +600,8 @@ void handleLine(char* line) {
 
     case 'R':
       if (ntok < 2 || !parseFingers(tok[1], mask)) { err("R <fingers>"); return; }
+      mask &= ~disabledMask;
+      if (mask == 0) { ok("R skipped: finger disabled"); return; }
       clearManualAngles(mask);
       manualReleased |= mask;
       Serial.print("ok R ");
@@ -542,7 +617,8 @@ void handleLine(char* line) {
       return;
 
     case 'S':
-      if (ntok < 3 || !parseFinger(tok[1], f) || !parseNum(tok[2], a, 0, 180)) { err("S <finger> <angle 0..180>"); return; }
+      if (ntok < 3 || !parseFinger(tok[1], f) || !parseNum(tok[2], a, MIN_ANGLE, MAX_ANGLE)) { err("S <finger> <angle -15..195>"); return; }
+      if ((disabledMask >> f) & 1) { ok("S skipped: finger disabled"); return; }
       cancelFingers(1 << f);
       manualAngle[f] = a;
       Serial.print("ok S ");
@@ -553,13 +629,13 @@ void handleLine(char* line) {
 
     case 'C':
       if (ntok == 1) { printAngles(); ok("C"); return; }
-      if (ntok < 4 || !parseFinger(tok[1], f) || !parseNum(tok[2], a, 0, 180) || !parseNum(tok[3], b, 0, 180)) {
-        err("C <finger> <lockAngle> <releaseAngle>");
+      if (ntok < 4 || !parseFinger(tok[1], f) || !parseNum(tok[2], a, MIN_ANGLE, MAX_ANGLE) || !parseNum(tok[3], b, MIN_ANGLE, MAX_ANGLE)) {
+        err("C <finger> <lockAngle> <releaseAngle>   angles -15..195");
         return;
       }
       lockAngle[f] = a;
       releaseAngle[f] = b;
-      servoTarget[f] = -1;
+      servoTarget[f] = NO_ANGLE;
       saveSettings();
       Serial.print("ok C ");
       Serial.print(FINGER_NAMES[f]);
@@ -596,6 +672,22 @@ void handleLine(char* line) {
       Serial.println(" (saved)");
       return;
 
+    case 'N':   // fingers to leave alone: "N 1" = thumb off, "N 15" = thumb and pinky off, "N 0" = all on
+      if (ntok < 2) { err("N <fingers to disable, or 0 for none>"); return; }
+      if (strcmp(tok[1], "0") == 0 || strcmp(tok[1], "-") == 0 || strcasecmp(tok[1], "none") == 0) {
+        mask = 0;
+      } else if (!parseFingers(tok[1], mask)) {
+        err("N <fingers to disable, or 0 for none>");
+        return;
+      }
+      disabledMask = mask;
+      saveSettings();
+      applyDisabled();
+      Serial.print("ok N disabled: ");
+      Serial.print(fingerStr(disabledMask));
+      Serial.println(" (saved)");
+      return;
+
     case 'A':
       if (ntok < 2 || !parseNum(tok[1], a, 0, 1)) { err("A 0|1"); return; }
       clearNotes();   // arming never starts anything by itself, disarming never leaves anything pending
@@ -628,6 +720,7 @@ void handleLine(char* line) {
       const int order[] = {0, 1, 2, 3, 4, 3, 2, 1, 0};
       unsigned long t = now + 300;
       for (unsigned k = 0; k < sizeof(order) / sizeof(order[0]); k++) {
+        if ((disabledMask >> order[k]) & 1) continue;
         scheduleNote(1 << order[k], t, DEMO_PRESS_MS);
         t += DEMO_STEP_MS;
       }
@@ -710,8 +803,9 @@ void resetState() {
   for (Note& n : notes) n.active = false;
   manualReleased = 0;
   for (int i = 0; i < NUM_FINGERS; i++) {
-    manualAngle[i] = -1;
-    servoTarget[i] = -1;
+    manualAngle[i] = NO_ANGLE;
+    servoTarget[i] = NO_ANGLE;
+    servoAttached[i] = false;
   }
   for (int r = 0; r < NUM_RELAYS; r++) {
     relayPulse[r] = false;
@@ -748,16 +842,16 @@ void setup() {
   setDefaults();
   loadSettings();
 
-  ESP32PWM::allocateTimer(0);
-  ESP32PWM::allocateTimer(1);
-  ESP32PWM::allocateTimer(2);
-  ESP32PWM::allocateTimer(3);
   for (int i = 0; i < NUM_FINGERS; i++) {
-    servos[i].setPeriodHertz(50);
-    servos[i].attach(SERVO_PINS[i], MIN_PULSE_US, MAX_PULSE_US);
-    servos[i].write(lockAngle[i]);
+    if ((disabledMask >> i) & 1) continue;      // disabled finger: pin stays idle, servo stays limp
+    servoAttached[i] = servoAttach(i);
+    if (!servoAttached[i]) {
+      Serial.print("! servo pwm failed on GPIO ");
+      Serial.println(SERVO_PINS[i]);
+    }
+    servoWrite(i, lockAngle[i]);
     servoTarget[i] = lockAngle[i];
-    delay(200);   // stagger so all five don't jerk at once
+    delay(200);   // stagger so they don't all jerk at once
   }
   emsOffSince = millis();
 

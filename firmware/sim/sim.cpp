@@ -4,14 +4,14 @@
 // Timing model: run(n) calls loop() once per simulated millisecond, then
 // advances the clock. cmd() feeds one line and runs a single millisecond, so a
 // command sent "at T" is processed in the loop() call at time T.
+#include <cmath>
 #include "Arduino.h"
-#include "ESP32Servo.h"
 #include "Preferences.h"
 
 unsigned long g_now = 0;
 int g_pins[64];
 int g_pinMode[64];
-int g_servoAngle[64];
+uint32_t g_ledcDuty[64];
 FakeSerial Serial;
 std::map<std::string, long> g_nvs;
 
@@ -33,7 +33,12 @@ static void run(unsigned long ms) {
 }
 static bool closed(int r) { return g_pins[RELAY_PINS[r]] == LOW; }   // active low
 static bool anyClosed() { return closed(0) || closed(1); }
-static int angle(int finger) { return g_servoAngle[SERVO_PINS[finger]]; }
+static int angle(int finger) {           // the angle the servo was last told, decoded from its PWM duty
+  uint32_t duty = g_ledcDuty[SERVO_PINS[finger]];
+  if (duty == 0) return -999;
+  double us = duty * 20000.0 / 65535.0;
+  return (int)lround((us - 500.0) * 180.0 / 1900.0);
+}
 static int count(const std::string& s, const char* needle) {
   int n = 0;
   for (size_t p = s.find(needle); p != std::string::npos; p = s.find(needle, p + 1)) n++;
@@ -74,13 +79,17 @@ static void quiet() {            // X, then long enough for any rest to end
   run(700);
   take();
 }
-static void reboot() {           // power cycle: RAM is fresh, flash (g_nvs) is kept
+static void rebootKeep() {       // power cycle: RAM is fresh, flash (g_nvs) is kept
   memset(g_pins, -1, sizeof g_pins);
   memset(g_pinMode, -1, sizeof g_pinMode);
-  memset(g_servoAngle, -1, sizeof g_servoAngle);
+  memset(g_ledcDuty, 0, sizeof g_ledcDuty);
   Serial.in.clear(); Serial.out.clear();
   setup();
   take();
+}
+static void reboot() {           // same, with every finger enabled (the shipped default disables the thumb)
+  g_nvs["off"] = 0;
+  rebootKeep();
 }
 
 int main() {
@@ -279,14 +288,14 @@ int main() {
   run(1);
   CHECK(angle(1) == 0 && angle(3) == 0, "D clears R holds and S parks, got %d %d", angle(1), angle(3));
   cmd("X");
-  CHECK(err(cmd("S 4 181")) && err(cmd("S 45 10")), "S argument checks");
+  CHECK(err(cmd("S 4 196")) && err(cmd("S 45 10")), "S argument checks");
   r = cmd("C 3 10 120");
   CHECK(ok(r) && angle(2) == 10, "new lock angle applied at once: %s", r.c_str());
   cmd("P 3 100");
   CHECK(angle(2) == 120, "new release angle used");
   run(400);
   CHECK(angle(2) == 10, "and new lock angle after");
-  CHECK(err(cmd("C 3 10")) && err(cmd("C 3 10 181")), "C argument checks");
+  CHECK(err(cmd("C 3 10")) && err(cmd("C 3 10 196")), "C argument checks");
   r = cmd("C");
   CHECK(r.find("middle 10/120") != std::string::npos, "C shows the table: %s", r.c_str());
   r = cmd("T 100 20 200 250");
@@ -297,6 +306,60 @@ int main() {
   CHECK(closed(0) && !closed(1), "mask 1 closes relay 1 only");
   run(600);
   CHECK(err(cmd("M 0")) && err(cmd("M 4")), "M range");
+
+  // ---- angles a little past both ends --------------------------------------
+  CHECK(ok(cmd("S 1 -15")) && angle(0) <= -14, "S accepts -15 (pulse floored at 350 us), got %d", angle(0));
+  CHECK(err(cmd("S 1 -16")) && err(cmd("S 1 196")), "range is -15..195");
+  CHECK(ok(cmd("S 1 195")) && angle(0) == 195, "195 is reachable, got %d", angle(0));
+  CHECK(ok(cmd("S 1 -1")) && angle(0) == -1, "-1 is a real angle, not 'no angle', got %d", angle(0));
+  cmd("R 3"); cmd("S 3 0");
+  CHECK(angle(2) == 0, "S 3 0 holds at 0 while R-released (0 is a real angle too), got %d", angle(2));
+  cmd("L 3"); cmd("L 1");
+  r = cmd("C 2 -10 100");
+  CHECK(ok(r) && angle(1) == -10, "negative lock angle applied at once, got %d", angle(1));
+  cmd("P 2 100");
+  CHECK(angle(1) == 100, "release 100 used");
+  run(400);
+  CHECK(angle(1) == -10, "back to the negative lock");
+  g_now += 10;
+  reboot();
+  CHECK(angle(1) == -10, "negative lock survives a reboot, got %d", angle(1));
+  cmd("C 2 0 90");
+  cmd("X");
+
+  // ---- disabled fingers (N) ----------------------------------------------
+  cmd("A 1");
+  r = cmd("N 1");
+  CHECK(ok(r) && angle(0) == -999 && g_pinMode[SERVO_PINS[0]] == INPUT, "N 1 detaches the thumb pin and floats it: %s", r.c_str());
+  r = cmd("P 1 300");
+  CHECK(ok(r) && r.find("skipped") != std::string::npos, "P on the disabled finger is skipped: %s", r.c_str());
+  run(400);
+  CHECK(!anyClosed() && angle(0) == -999, "no pulse, no servo move for a skipped note");
+  cmd("P 12 300");
+  CHECK(angle(1) == 90 && angle(0) == -999, "chord keeps only the enabled finger");
+  run(200);
+  CHECK(anyClosed(), "and still pulses for it");
+  run(500);
+  CHECK(ok(cmd("S 1 50")) && ok(cmd("R 1")) && angle(0) == -999, "S and R on the disabled finger do nothing");
+  cmd("D"); run(400);                               // first demo note releases at +300
+  CHECK(angle(0) == -999 && angle(1) == 90, "demo skips the thumb and goes straight to the index, got %d %d", angle(0), angle(1));
+  cmd("X");
+  r = cmd("?");
+  CHECK(r.find("disabled: thumb") != std::string::npos, "status shows it: %s", r.c_str());
+  g_now += 10;
+  rebootKeep();
+  CHECK(angle(0) == -999 && angle(1) == 0, "the disabled set survives a reboot");
+  r = cmd("N 0");
+  CHECK(ok(r), "N 0: %s", r.c_str());
+  run(1);
+  CHECK(angle(0) == 0, "re-enabled thumb is attached and locked, got %d", angle(0));
+  cmd("A 1"); cmd("P 1 100"); run(80);
+  CHECK(angle(0) == 90, "and plays again");
+  run(400);
+  CHECK(err(cmd("N x")), "N argument check");
+  g_now += 10;
+  rebootKeep();                                     // "off" is saved as 0 now
+  CHECK(angle(0) == 0, "all-enabled also survives a reboot");
 
   // ---- settings survive a reboot; arm state does not; F forgets ----------
   g_now += 10;
