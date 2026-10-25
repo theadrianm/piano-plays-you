@@ -80,7 +80,7 @@ Do this once, in order, **with the TENS unplugged from the relays**.
    C 1 0 90     # lock angle 0, release angle 90, saved
    ```
    Repeat for 2..5. `C` prints the table. Then `X` and check every finger is blocked, `R *` and check every finger is free.
-4. **Relays, TENS still unplugged.** `A 1`, then `K 1 1000`: relay 1 clicks and its LED lights for one second. `K 2 1000` for relay 2. With a multimeter in continuity mode on the two screw terminals you wired: **no beep when the LED is off, beep when it is on.** If it beeps when off, the wire is on NC instead of NO. Fix that before going further.
+4. **Relays, TENS still unplugged.** `A 1`, then `K 1 1000`: relay 1 clicks and its LED lights for one second. `K 2 1000` for relay 2. (`python host/relay_test.py --yes` does this sequence for you.) With a multimeter in continuity mode on the two screw terminals you wired: **no beep when the LED is off, beep when it is on.** If it beeps when off, the wire is on NC instead of NO. Fix that before going further. No click and no LED at all means the relay board has no 5 V: its VCC comes off the servo rail, so the battery has to be on.
 5. **Pick the mask.** Both relays close for a note by default (`M 3`). If only one is in the TENS path, `M 1` or `M 2`.
 6. **TENS, low.** Plug the TENS in, intensity near zero, pads on the forearm, `A 1`, `E 300`. Raise the dial until the fingers twitch. Then `P 2 300` with the glove on: only the index finger should press.
 7. **Power.** Plug the servo battery in **after** uploading (power banks switch off when nothing draws current during the upload). Keep the 1000 µF capacitor on the servo rail. Avoid holding all five servos stalled at once.
