@@ -17,6 +17,7 @@ One-shot forms, fine from any prompt:
 
     .venv/bin/python calibrate.py show
     .venv/bin/python calibrate.py move 2 35        # hold the index servo at 35 degrees to look at it
+    .venv/bin/python calibrate.py move all 30      # hold every servo at 30 (re-seating horns: see README)
     .venv/bin/python calibrate.py set 2 35 120     # index: lock 35, release 120, saved to flash
     .venv/bin/python calibrate.py lock             # everything back to lock
 
@@ -205,9 +206,12 @@ def main():
             saved = read_angles(glove)
             print(table(saved, saved))
         elif mode == "move" and len(args) == 3:
-            f, angle = finger_arg(args[1]), angle_arg(args[2])
-            glove.cmd(f"S {f} {angle}")
-            print(f"{NAMES[f - 1]} held at {angle}°. It stays there until 'lock', a song, or the next time a program opens the port.")
+            fingers = [1, 2, 3, 4, 5] if args[1] in ("all", "*") else [finger_arg(c) for c in args[1]]
+            angle = angle_arg(args[2])
+            for f in fingers:
+                glove.cmd(f"S {f} {angle}")
+            held = ", ".join(NAMES[f - 1] for f in fingers)
+            print(f"{held} held at {angle}°. Stays there until 'lock', a song, or the next time a program opens the port.")
             return                                   # leave the hold in place
         elif mode == "set" and len(args) == 4:
             f, lock, release = finger_arg(args[1]), angle_arg(args[2]), angle_arg(args[3])
