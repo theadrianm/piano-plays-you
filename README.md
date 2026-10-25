@@ -33,7 +33,7 @@ Every finger idles **locked**. `P 3 300` plays the middle finger for 300 ms:
  release middle servo --lead 150--> relays close --300 ms--> relays open --relax 50--> lock middle servo
 ```
 
-The other four fingers stay locked, so when the EMS fires, only the middle finger can curl. The next note waits until the relays have been open for `gap` (150 ms, time for the finger to lift). Chords are one token: `P 13 400`. Everything is timestamped and advanced from `loop()`, nothing blocks, and `X` stops it all within a millisecond.
+The other four fingers stay locked, so when the EMS fires, only the middle finger can curl. The next note waits until the relays have been open for `gap` (150 ms, time for the finger to lift); a note that arrives too early is pushed back rather than dropped, so a song that is too fast runs late instead of losing notes. Notes whose press windows overlap (a chord sent as two commands, a legato pair) share one pulse. Chords are one token: `P 13 400`. Everything is timestamped and advanced from `loop()`, nothing blocks, and `X` stops it all within a millisecond.
 
 ### Commands
 
@@ -48,7 +48,7 @@ Fingers are `1`..`5` = thumb..pinky (piano fingering) or `t i m r p`. Several in
 | `C` / `C <finger> <lock> <release>` | show / set the lock and release angles (saved to flash) |
 | `T` / `T <lead> <relax> <gap> [press]` | show / set timing in ms (saved to flash) |
 | `M <1\|2\|3>` | which relays an EMS pulse closes (3 = both, the default) |
-| `A 0\|1` | disarm / arm the relays. **Boots disarmed.** |
+| `A 0\|1` | disarm / arm the relays. **Boots disarmed.** Either way clears notes in flight, so arming never starts anything by itself. |
 | `K <relay> [ms]` | close one relay by itself for a moment (needs arm) |
 | `D` | demo: five-finger scale up and back |
 | `V 0\|1` | event log off / on |
@@ -58,11 +58,14 @@ Fingers are `1`..`5` = thumb..pinky (piano fingering) or `t i m r p`. Several in
 
 ### Safety
 
-- The relays are driven off before anything else in `setup()` and stay off until `A 1`. `A 0` and `X` open them immediately.
+- The relays are driven off before anything else in `setup()` and stay off until `A 1`. `A 0` and `X` open them immediately, and arming never resumes anything that was queued.
 - No relay stays closed longer than **2 s**, whatever was asked. Then everything stops and the relays rest for 0.5 s (`! cutoff` on serial).
 - One press is capped at 1.5 s and a 150 ms rest is forced between presses.
+- One command is handled per pass of `loop()`, so the timing code keeps running however fast the laptop talks.
 - Settings changes and the arm state are separate: arming never survives a reboot.
 - The TENS intensity knob is the real ceiling. The glove only passes through what a person set on the dial, never more.
+
+`firmware/sim/run.sh` compiles the sketch against stub Arduino headers and drives it with a simulated clock through the sequences above (overlaps, the cutoff, disarm mid-pulse, clock wraparound, serial edge cases). Run it after changing the firmware.
 
 ## Bring-up checklist
 
@@ -129,4 +132,5 @@ python play.py songs/happy-birthday.txt --arm
 - **Commands do nothing in the Serial Monitor.** Line ending must be Newline (the firmware also accepts a 200 ms pause as end of line).
 - **`P` moves the servo but nothing happens on the arm.** `?` says DISARMED: send `A 1`. Or `M` points at the wrong relay.
 - **`! cutoff` on serial.** Something kept a relay closed for 2 s. Everything stopped; send `?`, then carry on.
+- **`Pin already attached to LEDC` at boot.** Only shows if the IDE's Core Debug Level is set. ESP32Servo 3.2.1 attaches each pin twice; harmless.
 - **play.py: can't open port.** The Serial Monitor is still open, or two ports are listed (pass `--port`).

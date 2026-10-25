@@ -112,12 +112,14 @@ unsigned long emsOnSince = 0, emsOffSince = 0;
 bool          relayOn[NUM_RELAYS];       // what the relay pins are actually doing
 bool          anyRelayOn = false;
 unsigned long relayOnSince = 0;
-unsigned long restUntil = 0;             // after a cutoff
+bool          resting = false;           // in the forced rest after a cutoff
+unsigned long restUntil = 0;
 int           servoTarget[NUM_FINGERS];  // last angle written, -1 = none
 
 char          lineBuf[96];
 size_t        lineLen = 0;
 bool          lineOverflow = false;
+bool          sawNewline = false;        // once a sender uses line endings, never guess them
 unsigned long lastRxMs = 0;
 
 // --------------------------------------------------------------- helpers ----
@@ -259,6 +261,11 @@ bool scheduleNote(uint8_t fingers, unsigned long startAt, unsigned long press) {
   return false;
 }
 
+void clearNotes() {
+  for (Note& n : notes) n.active = false;
+  for (int r = 0; r < NUM_RELAYS; r++) relayPulse[r] = false;
+}
+
 void clearManualAngles(uint8_t mask) {
   for (int i = 0; i < NUM_FINGERS; i++) {
     if (mask & (1 << i)) manualAngle[i] = -1;
@@ -290,7 +297,7 @@ void openRelays(unsigned long now) {
 }
 
 void stopAll() {
-  for (Note& n : notes) n.active = false;
+  clearNotes();
   manualReleased = 0;
   for (int i = 0; i < NUM_FINGERS; i++) manualAngle[i] = -1;
   openRelays(millis());
@@ -302,6 +309,7 @@ void stopAll() {
 
 void cutoff(unsigned long now) {
   stopAll();
+  resting = true;
   restUntil = now + CUTOFF_REST_MS;
   Serial.print("! cutoff: a relay was closed for ");
   Serial.print(MAX_RELAY_ON_MS);
@@ -329,8 +337,10 @@ void tick() {
     }
   }
 
-  // The logical EMS pulse. Turning on needs: armed, past any cutoff rest,
-  // and the relays open for at least gapMs so the last finger had time to lift.
+  if (resting && after(now, restUntil)) resting = false;
+
+  // The logical EMS pulse. Turning on needs: armed, not in a cutoff rest, and
+  // the relays open for at least gapMs so the last finger had time to lift.
   if (emsOn && (!emsWanted || !armed)) {
     emsOn = false;
     emsOffSince = now;
@@ -339,18 +349,32 @@ void tick() {
       Serial.print(now - emsOnSince);
       Serial.println(" ms");
     }
-  } else if (!emsOn && emsWanted && armed && after(now, restUntil) && now - emsOffSince >= gapMs) {
-    emsOn = true;
-    emsOnSince = now;
-    if (verbose) {
-      Serial.print("# ems on ");
-      Serial.println(fingerStr(pressing));
+  } else if (!emsOn && emsWanted && armed) {
+    unsigned long earliest = emsOffSince + gapMs;
+    if (resting && after(restUntil, earliest)) earliest = restUntil;
+    if (after(now, earliest)) {
+      emsOn = true;
+      emsOnSince = now;
+      if (verbose) {
+        Serial.print("# ems on ");
+        Serial.println(fingerStr(pressing));
+      }
+    } else {
+      // Too soon. Push the waiting notes back so they still play, just late,
+      // rather than losing them.
+      for (Note& n : notes) {
+        if (!n.active || !after(now, n.tOn) || after(now, n.tOff)) continue;
+        const unsigned long press = n.tOff - n.tOn;
+        n.tOn = earliest;
+        n.tOff = earliest + press;
+        n.tLock = n.tOff + relaxMs;
+      }
     }
   }
 
   // Relay pins: the EMS pulse through the mask, or a K pulse. Never when
   // disarmed, never during the rest after a cutoff.
-  const bool mayClose = armed && after(now, restUntil);
+  const bool mayClose = armed && !resting;
   bool anyOn = false;
   for (int r = 0; r < NUM_RELAYS; r++) {
     if (relayPulse[r] && after(now, relayPulseEnd[r])) relayPulse[r] = false;
@@ -432,6 +456,7 @@ void printStatus() {
   Serial.println(RELAY_PINS[1]);
   Serial.print("# ems: ");
   Serial.print(armed ? "ARMED" : "DISARMED (send A 1 to arm)");
+  if (resting) Serial.print(" | RESTING after a cutoff");
   Serial.print(" | mask ");
   Serial.print(emsMask);
   Serial.print(" | relay1 ");
@@ -462,7 +487,10 @@ void handleLine(char* line) {
   for (char* t = strtok_r(line, " \t", &save); t != nullptr && ntok < 6; t = strtok_r(nullptr, " \t", &save)) {
     tok[ntok++] = t;
   }
-  if (ntok == 0) return;
+  if (ntok == 0) {
+    err("empty line");
+    return;
+  }
   if (strlen(tok[0]) != 1) {
     err("unknown command, send ? for help");
     return;
@@ -479,8 +507,8 @@ void handleLine(char* line) {
       if (ntok < 2 || !parseFingers(tok[1], mask)) { err("P <fingers> [pressMs]   e.g. P 3 300 or P 13 400"); return; }
       a = pressMs;
       if (ntok >= 3 && !parseNum(tok[2], a, MIN_PRESS_MS, MAX_PRESS_MS)) { err("press must be 30..1500 ms"); return; }
-      clearManualAngles(mask);
       if (!scheduleNote(mask, now, a)) { err("too many notes in flight"); return; }
+      clearManualAngles(mask);
       Serial.print("ok P ");
       Serial.print(fingerStr(mask));
       Serial.print(' ');
@@ -570,6 +598,7 @@ void handleLine(char* line) {
 
     case 'A':
       if (ntok < 2 || !parseNum(tok[1], a, 0, 1)) { err("A 0|1"); return; }
+      clearNotes();   // arming never starts anything by itself, disarming never leaves anything pending
       armed = (a == 1);
       if (!armed) openRelays(now);
       ok(armed ? "A 1 ARMED: relays live" : "A 0 disarmed: relays open");
@@ -582,6 +611,7 @@ void handleLine(char* line) {
         return;
       }
       if (!armed) { err("disarmed, send A 1 first"); return; }
+      if (resting) { err("resting after a cutoff, try again in a moment"); return; }
       relayPulse[b - 1] = true;
       relayPulseEnd[b - 1] = now + a;
       Serial.print("ok K relay ");
@@ -592,7 +622,9 @@ void handleLine(char* line) {
       return;
 
     case 'D': {
-      for (Note& n : notes) n.active = false;
+      clearNotes();
+      manualReleased = 0;
+      clearManualAngles((1 << NUM_FINGERS) - 1);
       const int order[] = {0, 1, 2, 3, 4, 3, 2, 1, 0};
       unsigned long t = now + 300;
       for (unsigned k = 0; k < sizeof(order) / sizeof(order[0]); k++) {
@@ -632,17 +664,21 @@ void handleLine(char* line) {
   }
 }
 
+// At most one command per pass, and a bounded number of bytes, so tick() keeps
+// running however fast a host talks to us (replies block on the UART FIFO).
 void pollSerial() {
-  while (Serial.available() > 0) {
+  for (int budget = 0; budget < 64 && Serial.available() > 0; budget++) {
     char ch = (char)Serial.read();
     lastRxMs = millis();
     if (ch == '\n' || ch == '\r') {
+      sawNewline = true;
+      lineOverflow = false;
       if (lineLen > 0) {
         lineBuf[lineLen] = 0;
-        handleLine(lineBuf);
         lineLen = 0;
+        handleLine(lineBuf);
+        return;
       }
-      lineOverflow = false;
       continue;
     }
     if (lineOverflow) continue;
@@ -652,14 +688,44 @@ void pollSerial() {
       lineOverflow = true;
       lineLen = 0;
       err("line too long");
+      return;
     }
   }
   // Serial Monitor set to "No line ending": 200 ms of silence ends the line.
-  if (lineLen > 0 && millis() - lastRxMs > 200) {
-    lineBuf[lineLen] = 0;
-    handleLine(lineBuf);
-    lineLen = 0;
+  // A sender that has used a line ending once never gets second-guessed.
+  if (!sawNewline && millis() - lastRxMs > 200) {
+    lineOverflow = false;
+    if (lineLen > 0) {
+      lineBuf[lineLen] = 0;
+      lineLen = 0;
+      handleLine(lineBuf);
+    }
   }
+}
+
+// Everything back to the state a fresh power-up has. Static initialisation
+// does this already on a real reset; doing it here too makes setup() safe to
+// reason about on its own.
+void resetState() {
+  for (Note& n : notes) n.active = false;
+  manualReleased = 0;
+  for (int i = 0; i < NUM_FINGERS; i++) {
+    manualAngle[i] = -1;
+    servoTarget[i] = -1;
+  }
+  for (int r = 0; r < NUM_RELAYS; r++) {
+    relayPulse[r] = false;
+    relayOn[r] = false;
+  }
+  armed = ARMED_AT_BOOT;
+  verbose = true;
+  emsOn = false;
+  anyRelayOn = false;
+  resting = false;
+  restUntil = 0;
+  lineLen = 0;
+  lineOverflow = false;
+  sawNewline = false;
 }
 
 // ------------------------------------------------------------------ main ----
@@ -672,20 +738,15 @@ void setup() {
     relayWrite(r, false);
     pinMode(RELAY_PINS[r], OUTPUT);
     relayWrite(r, false);
-    relayOn[r] = false;
-    relayPulse[r] = false;
   }
   pinMode(LED_PIN, OUTPUT);
   digitalWrite(LED_PIN, LOW);
 
   Serial.begin(115200);
 
+  resetState();
   setDefaults();
   loadSettings();
-  for (int i = 0; i < NUM_FINGERS; i++) {
-    manualAngle[i] = -1;
-    servoTarget[i] = -1;
-  }
 
   ESP32PWM::allocateTimer(0);
   ESP32PWM::allocateTimer(1);
